@@ -1,0 +1,199 @@
+项目简介：stm32f407实现定时器3（Timer3）触发ADC双通道同时采样并在DMA中断读取每次转换的结果
+
+项目需求：
+
+　　对两路信号进行ADC同时采样。由于一路信号将作为参考信号解调另一路信号，所以要确保两路信号的每次采样是同时进行的。所以，需要将ADC设置成“多重ADC模式”中的“规则同时模式”下的“双重ADC模式”（ADC_DualMode_RegSimult）。由于待采样的信号频率范围不确定，但是又要求每次采样之间的时间间隔较为精确，故需要ADC采样率可调但是又不能简单的使用delay()函数，所以要求ADC的每次转换由定时器触发（ADC_ExternalTrigConvEdge_Rising）。
+
+　　其中，需要注意的点有：
+
+    多重ADC模式下想要多路ADC同步（同时）转换，只能通过DMA功能来同时获取两路ADC的转换结果到目标地址（自己定义的用于保存转换结果的数组），即便不需要DMA做大量的数据搬运工作。
+    要想定时器触发ADC的转换，Timer必须配置成PWM模式。
+    要想在DMA转换结束后及时调用转换结果，需要开启DMA传输完成的中断，然后再中断中及时对数据进行处理。
+
+ 下面，本文将一步一步记录，我是如何完成项目需求的程序功能的。
+
+　　首先，我找来了原子stm32f407探索者开发板提供的定时器例程作为模板，准备往其中添加内容完成最终的功能。
+
+    实验8 定时器中断实验
+
+　　然而，原子的ADC教学中并没有关于ADC双通道同步采样的例程，故在某一篇博友的博文（链接遗失，感谢博友好人）中受到启发，去到st官网下载了官方的双通道adc规则同步采样的例程。下载地址链接为［下载地址］［下载页面］，如果下载链接失效，那么可以自己前往官网搜索stm32f407，找到名为“STM32F4 DSP and standard peripherals library”的资源下载。例程的目录如下，在本文的最后也会提供该例程的下载。
+
+    en.stm32f4_dsp_stdperiph_lib
+
+    －－STM32F4xx_DSP_StdPeriph_Lib_V1.8.0
+
+    －－－－Project
+
+    －－－－－－STM32F4xx_StdPeriph_Examples
+
+    －－－－－－－－ADC
+
+    －－－－－－－－－－ADC_DualModeRegulSimu
+
+ 　　根据例程中excel画出的图示，我们可以很清楚的看到每次两个通道同时采样完成后，结果通过DMA获取。该例程中还是使用软件触发ADC启动转换，先不管这些，我们先把这个例程和原子的定时器Timer的例程整合到一起。
+规则同步ADC采样时序示意图，来自ST官方demo
+规则同步ADC采样时序示意图，来自ST官方demo
+
+　　整合好的文件名为：
+
+    myTest-20190203-dualADCok
+
+　　在文章的最后将会附上下载链接。
+
+　　大概来看一下这个代码做了什么事：就是在Timer3的中断里，通过调用ADC_SoftwareStartConv(ADC1);函数触发了双通道ADC的规则同步转换，然后从DMA的目标数组中读取结果，通过串口输出。关键代码如下：
+
+　　就是简单的将两个例程整合，并没有做太多别的事情。
+
+//定义存储转换结果的数组
+
+__IO uint16_t aADCDualConvertedValue[2];
+
+
+// ADC初始化部分
+
+ADC_InitStructure.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_None;
+
+……
+
+ADC_Init(ADC1, &ADC_InitStructure);
+ADC_Init(ADC2, &ADC_InitStructure);
+ADC_MultiModeDMARequestAfterLastTransferCmd(ENABLE);
+ADC_Cmd(ADC1, ENABLE);
+ADC_Cmd(ADC2, ENABLE);
+
+
+//获取ADC采样的值部分
+
+ADC_SoftwareStartConv(ADC1);
+adcVal01= aADCDualConvertedValue[0];			
+adcVal02= aADCDualConvertedValue[1];		
+sprintf(msgstr,"adc ch5=%d ch6=%d\r\n",adcVal01,adcVal02);
+printf(msgstr);
+
+
+//DMA初始化部分
+
+DMA_InitTypeDef DMA_InitStructure;
+
+DMA_InitStructure.DMA_Channel = DMA_Channel_0; 
+DMA_InitStructure.DMA_Memory0BaseAddr = (uint32_t)&aADCDualConvertedValue;
+DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)ADC_CCR_ADDRESS;
+DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralToMemory;
+DMA_InitStructure.DMA_BufferSize = 2;
+DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
+DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Enable;
+DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord;
+DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_HalfWord;
+DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
+DMA_InitStructure.DMA_Priority = DMA_Priority_High;
+DMA_InitStructure.DMA_FIFOMode = DMA_FIFOMode_Enable;         
+DMA_InitStructure.DMA_FIFOThreshold = DMA_FIFOThreshold_HalfFull;
+DMA_InitStructure.DMA_MemoryBurst = DMA_MemoryBurst_Single;
+DMA_InitStructure.DMA_PeripheralBurst = DMA_PeripheralBurst_Single;
+DMA_Init(DMA2_Stream0, &DMA_InitStructure);
+
+//DMA_ITConfig(DMA2_Stream0, DMA_IT_TC | DMA_IT_HT, ENABLE);
+/* DMA2_Stream0 enable */
+DMA_Cmd(DMA2_Stream0, ENABLE);
+
+　　运行结果如下：
+
+运行结果１
+
+　　目前，ADC的转换还是在定时器的中断中，通过调用函数，这种产生软件触发的方式进行的。
+
+　　下一步，需要将ADC的转换改为由定时器触发。那么，在改动的过程中会遇到哪些问题呢？关键代码如下：
+
+//ADC初始化部分
+
+ADC_InitStructure.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_Rising;
+ADC_InitStructure.ADC_ExternalTrigConv= ADC_ExternalTrigConv_T3_CC1;
+
+
+//定时器初始化部分
+
+TIM_TimeBaseInit(TIM3,&TIM_TimeBaseInitStructure);
+TIM_ITConfig(TIM3,TIM_IT_Update,ENABLE); 
+
+ /* TIM1 channel1 configuration in PWM mode */ 
+TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1; 
+TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;                
+TIM_OCInitStructure.TIM_Pulse = 500; 
+TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_Low;         
+TIM_OC1Init(TIM3, &TIM_OCInitStructure); 
+TIM_CtrlPWMOutputs(TIM3, ENABLE);
+
+TIM_Cmd(TIM3,ENABLE);
+
+NVIC_InitStructure.NVIC_IRQChannel=TIM3_IRQn; 
+NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority=0x01; 
+NVIC_InitStructure.NVIC_IRQChannelSubPriority=0x03; 
+NVIC_InitStructure.NVIC_IRQChannelCmd=ENABLE;
+NVIC_Init(&NVIC_InitStructure);
+
+　　改好后的文件名为：
+
+    myTest-20190203-dualADCandTimerTrigOk
+
+　　在文末会提供下载。主要修改的地方是：
+
+    ADC初始化部分对ADC的触发方式做了修改
+    定时器初始化部分，将Timer配置成的PWM的模式
+    配置定时器相关中断
+
+　　运行结果如下：
+
+运行结果２
+
+　　这里，取消了定时器3溢出时的中断函数。可见，我们可以在主函数while(1)循环中，不断的读取转换结果保存数组的值，打印出来，然后发现每次读取的结果确实在随着输入信号的变化而改变。因此我们知道了，Timer触发ADC采样配置成功了。但是还并不知道在什么时候完成了一次转换。图示表明，在打印速率大于转换速率的时候，我们将每一次的采样结果打印了多遍。
+
+//TIM_ITConfig(TIM3,TIM_IT_Update,ENABLE); //注释掉Timer3中断
+
+　　但是，怎么才能在每次转化好了后，及时的把采样的结果获取到呢？
+
+　　其实，只需要再加上DMA传输完成后的中断函数，在DMA的中断中及时处理每次DMA传输的采样结果就行了。关键代码如下：
+
+//DMA初始化部分
+
+DMA_Init(DMA2_Stream0, &DMA_InitStructure);
+
+DMA_ClearITPendingBit(DMA2_Stream0, DMA_IT_TC); 
+DMA_ITConfig(DMA2_Stream0, DMA_IT_TC, ENABLE); 
+/* DMA2_Stream0 enable */
+DMA_Cmd(DMA2_Stream0, ENABLE);
+
+
+//增加DMA中断处理函数
+
+void DMA2_Stream0_IRQHandler(void) 
+{     
+	if(DMA_GetITStatus(DMA2_Stream0, DMA_IT_TCIF0)) 
+	{
+		DMA_ClearITPendingBit(DMA2_Stream0, DMA_IT_TCIF0);
+		
+		printf("DMA interrupt:\r\n");
+		adcVal01= aADCDualConvertedValue[0];			
+		adcVal02= aADCDualConvertedValue[1];		
+		sprintf(msgstr,"adc ch5=%d ch6=%d\r\n",adcVal01,adcVal02);
+		printf(msgstr);
+		printf("\r\n");
+	}
+}
+
+　　最终实现了完整功能的程序命名如下：
+
+     myTest-20190203-dualADCandTimerTrigAndDMAinterrOk
+
+　　运行结果如下：
+
+运行结果３
+
+最后附上本文所述代码的下载链接地址：
+
+下载地址一：来源于CSDN的下载
+
+下载地址二：来源于Github
+
+本文代码可直接在原子STM32F407ZGT6的战舰开发板上运行。
+
+感谢各位的阅读，如果您觉得有用或觉得哪里有错误，希望您能够留言表示支持。
